@@ -4,6 +4,7 @@ import dash_core_components as dcc
 import dash_html_components as html
 from dash.dependencies import Input, Output, State
 import dash_table
+import plotly
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
@@ -58,27 +59,31 @@ def rd_ts_summ(server, db, ts_summ_table, dataset_table, mtype_table, sites_tabl
 
     return ts_summ
 
-def sel_ts_summ(ts_summ, features, mtypes, ctypes, data_codes, data_providers, start_date, end_date):
-    if isinstance(features, str):
-        features = [features]
-    if isinstance(mtypes, str):
-        mtypes = [mtypes]
-    if isinstance(ctypes, str):
-        ctypes = [ctypes]
-    if isinstance(data_codes, str):
-        data_codes = [data_codes]
-    if isinstance(data_providers, str):
-        data_providers = [data_providers]
 
-    date_bool = ((ts_summ.FromDate >= start_date) & (ts_summ.FromDate <= end_date)) | ((ts_summ.ToDate >= start_date) & (ts_summ.ToDate <= end_date)) | ((ts_summ.FromDate <= start_date) & (ts_summ.ToDate >= end_date))
-    df = ts_summ[date_bool & ts_summ.Feature.isin(features) & ts_summ.MeasurementType.isin(mtypes) & ts_summ.CollectionType.isin(ctypes) & ts_summ.DataCode.isin(data_codes) & ts_summ.DataProvider.isin(data_providers)].copy()
+def rd_site_summ(server, db, lf_site_table, sites_table, from_date, to_date):
+    site_summ = mssql.rd_sql(server, db, lf_site_table, ['site', 'date', 'site_type', 'flow_method', 'days_since_flow_est', 'flow', 'crc_count', 'min_trig', 'max_trig', 'restr_category'], from_date=from_date, to_date=to_date, date_col='date', rename_cols=['ExtSiteID', 'Date', 'Site type', 'Data source', 'Days since last estimate', 'Flow or water level', 'Crc count', 'Min trigger', 'Max trigger', 'Restriction category'])
+    sites1 = site_summ.ExtSiteID.unique().tolist()
 
-    df['FromDate'] = df['FromDate'].dt.date.astype(str)
-    df['ToDate'] = df['ToDate'].dt.date.astype(str)
-    df['Min'] = df['Min'].round(3).astype(str)
-    df['Mean'] = df['Mean'].round(3).astype(str)
-    df['Max'] = df['Max'].round(3).astype(str)
-    return df
+    ## Get site info
+    sites = mssql.rd_sql(server, db, sites_table, ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY'], where_col={'ExtSiteID': sites1})
+    sites['NZTMX'] = sites['NZTMX'].astype(int)
+    sites['NZTMY'] = sites['NZTMY'].astype(int)
+
+    sites.loc[sites.ExtSiteName.isnull(), 'ExtSiteName'] = ''
+
+    # Convert projections
+    xy1 = list(zip(sites['NZTMX'], sites['NZTMY']))
+    x, y = list(zip(*[transform(from_crs1, to_crs1, x, y) for x, y in xy1]))
+
+    sites['lon'] = x
+    sites['lat'] = y
+
+    combo = pd.merge(sites, site_summ, on='ExtSiteID')
+
+    # Hover text
+    combo['hover'] = combo.ExtSiteID + '<br>' + combo.ExtSiteName.str.strip() + '<br>' + combo['Data source'] + ' ' + combo['Days since last estimate'].astype(str) + ' day(s) ago'
+
+    return combo
 
 
 ##########################################
@@ -87,86 +92,81 @@ def sel_ts_summ(ts_summ, features, mtypes, ctypes, data_codes, data_providers, s
 server = 'sql2012test01'
 db = 'hydro'
 sites_table = 'ExternalSite'
-ts_summ_table = 'TSDataNumericDailySumm'
-ts_table = 'TSDataNumericDaily'
-dataset_table = 'vDatasetTypeNamesActive'
-mtype_table = 'MeasurementType'
+lf_site_table = 'LowFlowRestrSite'
+lf_site_band_table = 'LowFlowRestrSiteBand'
+lf_crc_table = 'LowFlowRestrSiteBandCrc'
+#ts_summ_table = 'TSDataNumericDailySumm'
+#ts_table = 'TSDataNumericDaily'
+#dataset_table = 'vDatasetTypeNamesActive'
+#mtype_table = 'MeasurementType'
 sites_cols = ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY']
 #datasettypes = [4, 5, 15]
 #datasettype_names = {4: 'Water Level (m)', 5: 'Flow (m3/s)', 15: 'Precip (mm)'}
 
+site_types = ['LowFlow', 'Residual']
+data_source = ['Telemetered', 'Correlated from Telem', 'Gauged', 'Manually Calculated', 'GW manual']
+restr_type = ['No', 'Partial', 'Full', 'Deactivated']
+
 ts_plot_height = 600
 map_height = 700
+
+#default_band_options = [{'value:': 'All Bands', 'label': 'All Bands'}]
+
+default_colors = plotly.colors.DEFAULT_PLOTLY_COLORS
 
 ### Convert projections
 from_crs1 = Proj('+proj=tmerc +ellps=GRS80 +a=6378137.0 +f=298.257222101 +towgs84=0,0,0,0,0,0,0 +pm=0  +lon_0=173 +x_0=1600000 +y_0=10000000 +k_0=0.9996 +lat_0=0 +units=m +axis=enu +no_defs', preserve_units=True)
 to_crs1 = Proj('+proj=longlat +datum=WGS84 +ellps=WGS84 +a=6378137 +f=298.257223563 +pm=0  +no_defs', preserve_units=True)
 
-init_dataset = 'River - Flow - Recorder - Primary - ECan (m**3/s)'
+restr_color_dict = {'No': 'rgb(44, 160, 44)', 'Partial': 'rgb(255, 127, 14)', 'Full': 'rgb(214, 39, 40)', 'Deactivated': 'rgb(31, 119, 180)'}
 
-table_cols = ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY', 'DatasetTypeID', 'Feature', 'MeasurementType', 'CollectionType', 'DataCode', 'DataProvider', 'Units', 'Min', 'Mean', 'Max', 'Count', 'FromDate', 'ToDate']
+table_cols = ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY', 'Date', 'Site type', 'Data source', 'Days since last estimate', 'Flow or water level', 'Crc count', 'Min trigger', 'Max trigger', 'Restriction category']
 
 lat1 = -43.45
 lon1 = 171.9
 zoom1 = 7
 
-#years = np.arange(min_year2 + 2, max_year + 1)
-#years_label = {str(min_year2): 'All Years'}
-#years_label.update({str(year): str(year) for year in years[::2]})
-#features = 'River'
-#mtypes = 'Abstraction'
-#ctypes = 'Recorder'
-#data_codes = 'RAW'
-#data_providers = 'ECan'
-#start_date = '2017-12-06'
-#end_date = '2018-12-06'
-
-mapbox_access_token = "pk.eyJ1IjoibXVsbGVua2FtcDEiLCJhIjoiY2pudXE0bXlmMDc3cTNxbnZ0em4xN2M1ZCJ9.sIOtya_qe9RwkYXj5Du1yg"
+mapbox_access_token = "pk.eyJ1IjoibXVsbGVua2FtcDEiLCJhIjoiY2pwbHloa2ZwMDA2cTQybzRnZm01dGczMCJ9.e_yydJz08VyqKWqUlzdgQg"
 
 ###############################################
 ### App layout
 
-map_layout = dict(mapbox = dict(layers = [], accesstoken = mapbox_access_token, style = 'outdoors', center=dict(lat=lat1, lon=lon1), zoom=zoom1), margin = dict(r=0, l=0, t=0, b=0), autosize=True, hovermode='closest', height=map_height)
+map_layout = dict(mapbox = dict(layers = [], accesstoken = mapbox_access_token, style = 'outdoors', center=dict(lat=lat1, lon=lon1), zoom=zoom1), margin = dict(r=0, l=0, t=0, b=0), autosize=True, hovermode='closest', height=map_height, showlegend=True, legend=dict(x=0, y=1, traceorder='normal', font=dict(family='sans-serif', size=12, color='#000'), bgcolor='#E2E2E2', bordercolor='#FFFFFF', borderwidth=2))
 
 def serve_layout():
 
-    ts_summ = rd_ts_summ(server, db, ts_summ_table, dataset_table, mtype_table, sites_table, sites_cols)
-
     ### prepare summaries and initial states
-    max_date = pd.Timestamp.now()
-    start_date = max_date - pd.DateOffset(years=1)
+    to_date = pd.Timestamp.now()
+    from_date = to_date - pd.DateOffset(weeks=2)
 
-    init_summ = sel_ts_summ(ts_summ, 'River', 'Flow', 'Recorder', 'Primary', 'ECan', str(start_date.date()), str(max_date.date()))
+    ### Read in site summary data
+    init_summ = rd_site_summ(server, db, lf_site_table, sites_table, str(from_date.date()), str(to_date.date()))
 
     new_sites = init_summ.drop_duplicates('ExtSiteID')
 
     layout = html.Div(children=[
     html.Div([
         html.P(children='Filter sites by:'),
-		html.Label('Feature'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(ts_summ.Feature.unique())], multi=True, value='River', id='features'),
-        html.Label('Measurement Type'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(ts_summ.MeasurementType.unique())], multi=True, value='Flow', id='mtypes'),
-        html.Label('CollectionType'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(ts_summ.CollectionType.unique())], multi=True, value='Recorder', id='ctypes'),
-        html.Label('Data Code'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(ts_summ.DataCode.unique())], multi=True, value='Primary', id='data_codes'),
-        html.Label('Data Provider'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(ts_summ.DataProvider.unique())], multi=True, value='ECan', id='data_providers'),
+		html.Label('Site Type'),
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in site_types], multi=True, value='LowFlow', id='site-type'),
+        html.Label('Data Source'),
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in data_source], multi=True, value=data_source, id='data-source'),
+        html.Label('Restriction Category'),
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in restr_type], multi=True, value=restr_type, id='restr-type'),
         html.Label('Date Range'),
 		dcc.DatePickerRange(
-            end_date=str(max_date.date()),
+            end_date=str(to_date.date()),
             display_format='DD/MM/YYYY',
-            start_date=str(start_date.date()),
+            start_date=str(from_date.date()),
             id='date_sel'
 #               start_date_placeholder_text='DD/MM/YYYY'
             ),
         html.Label('Site IDs'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in np.sort(init_summ.ExtSiteID.unique())], multi=True, id='sites')
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in new_sites.ExtSiteID.sort_values()], multi=True, id='sites-dropdown')
 		], className='two columns', style={'margin': 20}),
 
 	html.Div([
-        html.P('Click on a site or "box select" multiple sites:', style={'display': 'inline-block'}),
+        html.P('Click on a site:', style={'display': 'inline-block'}),
 		dcc.Graph(
                 id = 'site-map',
                 style={'height': map_height},
@@ -187,17 +187,17 @@ def serve_layout():
                 config={"displaylogo": False}),
 
         html.A(
-            'Download Dataset Summary Data',
+            'Download Site Summary Data',
             id='download-summ',
-            download="dataset_summary.csv",
+            download="site_summary.csv",
             href="",
             target="_blank",
             style={'margin': 50}),
 
         dash_table.DataTable(
             id='summ_table',
-            columns=[{"name": i, "id": i, 'deletable': True} for i in table_cols],
-            data=init_summ[table_cols].astype(str).to_dict('rows'),
+            columns=[{"name": i, "id": i, 'deletable': True} for i in init_summ.columns],
+            data=init_summ.astype(str).to_dict('rows'),
             sorting=True,
             sorting_type="multi",
             style_cell={
@@ -211,8 +211,8 @@ def serve_layout():
 
     html.Div([
 
-		html.P('Select Dataset for time series plot:', style={'display': 'inline-block'}),
-		dcc.Dropdown(options=[{'value:': 5, 'label': init_dataset}], value=5, id='sel_dataset'),
+		html.P('Select band for time series plot:', style={'display': 'inline-block'}),
+		dcc.Dropdown(options=[], multi=True, id='band-dropdown'),
 		dcc.Graph(
 			id = 'selected-data',
 			figure = dict(
@@ -233,8 +233,7 @@ def serve_layout():
             target="_blank",
             style={'margin': 50})
 	], className='six columns', style={'margin': 10, 'height': 900}),
-    html.Div(id='summ_data', style={'display': 'none'}),
-    html.Div(id='summ_data_all', style={'display': 'none'}, children=ts_summ.to_json(date_format='iso', orient='split')),
+    html.Div(id='summ_data', style={'display': 'none'}, children=init_summ.to_json(date_format='iso', orient='split')),
     dcc.Graph(id='map-layout', style={'display': 'none'}, figure=dict(data=[], layout=map_layout))
 ], style={'margin':0})
 
@@ -250,13 +249,12 @@ app.css.append_css({'external_url': 'https://codepen.io/plotly/pen/EQZeaW.css'})
 
 
 @app.callback(
-    Output('summ_data', 'children'), [Input('features', 'value'), Input('mtypes', 'value'), Input('ctypes', 'value'), Input('data_codes', 'value'), Input('data_providers', 'value'), Input('date_sel', 'start_date'), Input('date_sel', 'end_date')], [State('summ_data_all', 'children')])
-def calc_summ(features, mtypes, ctypes, data_codes, data_providers, start_date, end_date, summ_data_all):
-    ts_summ = pd.read_json(summ_data_all, orient='split')
-    ts_summ['FromDate'] = pd.to_datetime(ts_summ['FromDate'])
-    ts_summ['ToDate'] = pd.to_datetime(ts_summ['ToDate'])
-    new_summ = sel_ts_summ(ts_summ, features, mtypes, ctypes, data_codes, data_providers, start_date, end_date).copy()
-    print(features, mtypes, ctypes, data_codes, data_providers, start_date, end_date)
+    Output('summ_data', 'children'), [Input('date_sel', 'start_date'), Input('date_sel', 'end_date')])
+def store_summ(start_date, end_date):
+#    ts_summ['FromDate'] = pd.to_datetime(ts_summ['FromDate'])
+#    ts_summ['ToDate'] = pd.to_datetime(ts_summ['ToDate'])
+    new_summ = rd_site_summ(server, db, lf_site_table, sites_table, start_date, end_date)
+    print('store_summ', start_date, end_date)
     return new_summ.to_json(date_format='iso', orient='split')
 
 
@@ -272,7 +270,10 @@ def update_map_layout(relay, figure):
             lat = float(relay['mapbox.center']['lat'])
             lon = float(relay['mapbox.center']['lon'])
             zoom = float(relay['mapbox.zoom'])
-            new_layout = dict(mapbox = dict(layers = [], accesstoken = mapbox_access_token, style = 'outdoors', center=dict(lat=lat, lon=lon), zoom=zoom), margin = dict(r=0, l=0, t=0, b=0), autosize=True, hovermode='closest', height=map_height)
+            new_layout = figure['layout'].copy()
+            new_layout['mapbox']['zoom'] = zoom
+            new_layout['mapbox']['center']['lat'] = lat
+            new_layout['mapbox']['center']['lon'] = lon
         else:
             new_layout = figure['layout'].copy()
     else:
@@ -283,43 +284,59 @@ def update_map_layout(relay, figure):
 
 @app.callback(
 		Output('site-map', 'figure'),
-		[Input('summ_data', 'children')],
-		[State('map-layout', 'figure')])
-def display_map(summ_data, figure):
+		[Input('summ_data', 'children'), Input('site-type', 'value'), Input('data-source', 'value'), Input('restr-type', 'value')],
+		[State('map-layout', 'figure'), State('date_sel', 'end_date')])
+def display_map(summ_data, site_type, data_source, restr_type, figure, end_date):
+    if isinstance(site_type, str):
+        site_type = [site_type]
+    if isinstance(data_source, str):
+        data_source = [data_source]
+    if isinstance(restr_type, str):
+        restr_type = [restr_type]
+
     new_summ = pd.read_json(summ_data, orient='split')
-    new_sites = new_summ.drop_duplicates('ExtSiteID')
+    new_sites = new_summ[(new_summ['Date'] == end_date) & (new_summ['Site type'].isin(site_type)) & (new_summ['Data source'].isin(data_source)) & (new_summ['Restriction category'].isin(restr_type))].drop_duplicates('ExtSiteID')
 #    print(new_sites)
 #    print(new_summ.ExtSiteID.unique())
 
-    data = [dict(
-		lat = new_sites['lat'],
-		lon = new_sites['lon'],
-		text = new_sites['hover'],
-		type = 'scattermapbox',
-		hoverinfo = 'text',
-		marker = dict(size=8, color='black', opacity=1)
-	)]
+    data = []
+    for r in restr_type:
+        sub_sites = new_sites[new_sites['Restriction category'] == r]
+        subset = dict(
+    		lat = sub_sites['lat'],
+    		lon = sub_sites['lon'],
+    		text = sub_sites['hover'],
+    		type = 'scattermapbox',
+    		hoverinfo = 'text',
+    		marker = dict(size=10, color=restr_color_dict[r], opacity=1),
+            name = r
+            )
+        data.append(subset)
 
     fig = dict(data=data, layout=figure['layout'])
     return fig
 
 
 @app.callback(
-    Output('sel_dataset', 'options'),
-    [Input('summ_data', 'children')])
-def update_dataset_options(summ_data):
-    new_summ = pd.read_json(summ_data, orient='split')
+    Output('band-dropdown', 'options'),
+    [Input('sites-dropdown', 'value'), Input('site-map', 'clickData')],
+    [State('date_sel', 'end_date')])
+def update_band_options(sites, clickdata, end_date):
+    if not sites:
+        options1 = []
+    else:
+        sites1 = [str(s) for s in sites]
+        site_bands = mssql.rd_sql(server, db, lf_site_band_table, ['band_num', 'band_name', 'site_type'], where_col={'site': sites1}, from_date=end_date, to_date=end_date, date_col='date').drop_duplicates(['band_name'])
+        site_bands['label'] = site_bands['band_name'] + ' - ' + site_bands['site_type']
+        site_bands1 = site_bands.rename(columns={'band_num': 'value'}).drop(['band_name', 'site_type'], axis=1)
+        options1 = site_bands1.to_dict('records')
 
-    new_summ2 = new_summ[['DatasetTypeID', 'Dataset Name']].drop_duplicates().copy()
-    new_summ2.columns = ['value', 'label']
-    options1 = new_summ2.to_dict('records')
-    print(options1)
-
+#    print(options1)
     return options1
 
 
 @app.callback(
-        Output('sites', 'options'),
+        Output('sites-dropdown', 'options'),
         [Input('summ_data', 'children')])
 def update_sites_options(summ_data):
     new_summ = pd.read_json(summ_data, orient='split')
@@ -329,7 +346,7 @@ def update_sites_options(summ_data):
 
 
 @app.callback(
-        Output('sites', 'value'),
+        Output('sites-dropdown', 'value'),
         [Input('site-map', 'selectedData'), Input('site-map', 'clickData')])
 def update_sites_values(selectedData, clickData):
     if selectedData is not None:
@@ -340,41 +357,108 @@ def update_sites_values(selectedData, clickData):
         print(sites1)
     else:
         sites1 = []
-    return sites1[:20]
+    return sites1[:1]
 
 
 @app.callback(
 	Output('selected-data', 'figure'),
-	[Input('sites', 'value'), Input('sel_dataset', 'value'), Input('site-map', 'selectedData'), Input('site-map', 'clickData')],
-	[State('date_sel', 'start_date'), State('date_sel', 'end_date')])
-def display_data(sites, sel_dataset, selected, clicked, start_date, end_date):
+	[Input('sites-dropdown', 'value'), Input('band-dropdown', 'value'), Input('date_sel', 'start_date'), Input('date_sel', 'end_date')])
+def display_data(sites, bands, start_date, end_date):
 
-    if not sites:
+    print(sites, bands, start_date, end_date)
+    if not sites or bands is None:
         return dict(
 			data = [dict(x=0, y=0)],
 			layout = dict(
-				title='Click-drag on the map to select sites',
+				title='Click on the map to select sites',
 				paper_bgcolor = '#F4F4F8',
 				plot_bgcolor = '#F4F4F8'
 			)
 		)
-    print(sel_dataset)
+#    print(bands)
     sites1 = [str(s) for s in sites]
 
-    ts1 = mssql.rd_sql(server, db, ts_table, ['ExtSiteID', 'DatasetTypeID', 'DateTime', 'Value'], where_col={'DatasetTypeID': [sel_dataset], 'ExtSiteID': sites1}, from_date=start_date, to_date=end_date, date_col='DateTime')
+    layout = dict(
+            title = 'Site ' + sites1[0],
+            paper_bgcolor = '#F4F4F8',
+            plot_bgcolor = '#F4F4F8',
+            xaxis = dict(range = [start_date, end_date]),
+            showlegend=True,
+            height=ts_plot_height,
+            legend=dict(x=0,
+                        y=1,
+                        traceorder='grouped',
+                        font=dict(family='sans-serif',
+                                  size=12,
+                                  color='#000'),
+                        bgcolor='rgba(0, 0, 0, 0)'
+                        ),
+            yaxis=dict(title='Flow (m3/s) or water level (m)',
+                       showgrid=True)
+            )
 
-    data = []
-    for s in sites1:
-        dataset1 = ts1[ts1.ExtSiteID == s]
-        set1 = go.Scattergl(
-                x=dataset1.DateTime,
-                y=dataset1.Value,
-                name=s,
-#                line={'color': col3[s]},
-                opacity=0.8)
-        data.append(set1)
+#    if bands is None:
+#        ts1 = mssql.rd_sql(server, db, lf_site_band_table, ['date', 'flow'], where_col={'site': sites1}, from_date=start_date, to_date=end_date, date_col='date')
+#        flow_data = ts1[['date', 'flow']].drop_duplicates('date')
+#        data = [go.Scattergl(
+#                    x=flow_data.date,
+#                    y=flow_data.flow,
+#                    legendgroup='flow',
+#                    name='Flow',
+#                    line={'color': 'black'},
+#                    opacity=1)]
+#    else:
 
-    layout = dict(title = 'Time series data', paper_bgcolor = '#F4F4F8', plot_bgcolor = '#F4F4F8', xaxis = dict(range = [start_date, end_date]), showlegend=True, height=ts_plot_height)
+    if isinstance(bands, int):
+        bands = [bands]
+
+    ts1 = mssql.rd_sql(server, db, lf_site_band_table, ['date', 'band_name', 'flow', 'min_trig', 'max_trig', 'band_allo'], where_col={'site': sites1, 'band_num': bands}, from_date=start_date, to_date=end_date, date_col='date')
+
+    color_dict = dict(zip(ts1.band_name.unique().tolist(), default_colors))
+
+    flow_data = ts1[['date', 'flow']].drop_duplicates('date')
+    data = [go.Scattergl(
+                x=flow_data.date,
+                y=flow_data.flow,
+                legendgroup='flow',
+                name='Flow',
+                line={'color': 'black'},
+                opacity=1)]
+    for name, group in ts1.groupby('band_name'):
+        min_trig = go.Scattergl(
+                x=group.date,
+                y=group.min_trig,
+                legendgroup=name,
+                name='Min Trigger, ' + name,
+                mode='lines',
+                line=dict(dash='dot', color=color_dict[name]),
+                opacity=0.7,
+                yaxis='y1')
+        max_trig = go.Scattergl(
+                x=group.date,
+                y=group.max_trig,
+                legendgroup=name,
+                name='Max Trigger, ' + name,
+                mode='lines',
+                line=dict(dash='dash', color=color_dict[name]),
+                opacity=0.7,
+                yaxis='y1')
+        allo = go.Scattergl(
+                x=group.date,
+                y=group.band_allo,
+                legendgroup=name,
+                name='Allowed Allocation %, ' + name,
+                line=dict(color=color_dict[name]),
+                opacity=0.7,
+                yaxis='y2',
+                xaxis='x1')
+        data.extend([min_trig, max_trig, allo])
+
+        layout['yaxis2'] = dict(title='Allowed Allocation %',
+                                overlaying='y',
+                                anchor= 'x',
+                                side='right',
+                                showgrid= False)
 
     fig = dict(data=data, layout=layout)
     return fig
@@ -382,7 +466,7 @@ def display_data(sites, sel_dataset, selected, clicked, start_date, end_date):
 
 @app.callback(
     Output('summ_table', 'data'),
-    [Input('summ_data', 'children'), Input('sites', 'value'), Input('site-map', 'selectedData'), Input('site-map', 'clickData')])
+    [Input('summ_data', 'children'), Input('sites-dropdown', 'value'), Input('site-map', 'selectedData'), Input('site-map', 'clickData')])
 def plot_table(summ_data, sites, selectedData, clickData):
     new_summ = pd.read_json(summ_data, orient='split')[table_cols]
 
@@ -393,16 +477,19 @@ def plot_table(summ_data, sites, selectedData, clickData):
 
 @app.callback(
     Output('download-tsdata', 'href'),
-    [Input('sites', 'value'), Input('site-map', 'selectedData'), Input('site-map', 'clickData'),	Input('sel_dataset', 'value')],
-	[State('date_sel', 'start_date'), State('date_sel', 'end_date')])
-def download_tsdata(sites, selectedData, clickData, sel_dataset, start_date, end_date):
+    [Input('sites-dropdown', 'value'), Input('band-dropdown', 'value'), Input('date_sel', 'start_date'), Input('date_sel', 'end_date')])
+def download_tsdata(sites, bands, start_date, end_date):
 
-    if not sites:
+    if not sites or bands is None:
         return ''
 
     sites1 = [str(s) for s in sites]
 
-    ts1 = mssql.rd_sql(server, db, ts_table, ['ExtSiteID', 'DatasetTypeID', 'DateTime', 'Value'], where_col={'DatasetTypeID': [sel_dataset], 'ExtSiteID': sites1}, from_date=start_date, to_date=end_date, date_col='DateTime')
+    if isinstance(bands, int):
+        bands = [bands]
+
+    ts1 = mssql.rd_sql(server, db, lf_site_band_table, where_col={'site': sites1, 'band_num': bands}, from_date=start_date, to_date=end_date, date_col='date')
+
     csv_string = ts1.to_csv(index=False, encoding='utf-8')
     csv_string = "data:text/csv;charset=utf-8," + urllib.parse.quote(csv_string)
     return csv_string
@@ -412,7 +499,7 @@ def download_tsdata(sites, selectedData, clickData, sel_dataset, start_date, end
     Output('download-summ', 'href'),
     [Input('summ_data', 'children')])
 def download_summ(summ_data):
-    new_summ = pd.read_json(summ_data, orient='split')[table_cols]
+    new_summ = pd.read_json(summ_data, orient='split')
 
     csv_string = new_summ.to_csv(index=False, encoding='utf-8')
     csv_string = "data:text/csv;charset=utf-8," + urllib.parse.quote(csv_string)
