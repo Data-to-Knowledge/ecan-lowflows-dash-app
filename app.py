@@ -9,7 +9,7 @@ import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
 from pdsql import mssql
-from pyproj import Proj, transform
+from util import app_ts_summ, sel_ts_summ, ecan_ts_data, lf_site_summ, app_allo_usage_summ, ecan_ts_summ
 import urllib
 
 pd.options.display.max_columns = 10
@@ -18,94 +18,21 @@ pd.options.display.max_columns = 10
 app = dash.Dash(__name__)
 server = app.server
 
-#######################################
-### Functions
-
-
-def rd_ts_summ(server, db, ts_summ_table, dataset_table, mtype_table, sites_table, sites_cols):
-    ## Load ts summary data
-    ts_summ1 = mssql.rd_sql(server, db, ts_summ_table)
-    ts_summ1['FromDate'] = pd.to_datetime(ts_summ1['FromDate'])
-    ts_summ1['ToDate'] = pd.to_datetime(ts_summ1['ToDate'])
-
-    ## Load other data
-    datasets1 = mssql.rd_sql(server, db, dataset_table)
-    mtypes = mssql.rd_sql(server, db, mtype_table)
-    datasets = pd.merge(datasets1, mtypes, on='MeasurementType')
-    datasets['Dataset Name'] = datasets.Feature + ' - ' + datasets.MeasurementType + ' - ' + datasets.CollectionType + ' - ' + datasets.DataCode + ' - ' + datasets.DataProvider + ' (' + datasets.Units + ')'
-
-    ## Merge the two
-    ts_summ2 = pd.merge(datasets, ts_summ1, on='DatasetTypeID')
-
-    ## Get site info
-    sites = mssql.rd_sql(server, db, sites_table, sites_cols)
-    sites['NZTMX'] = sites['NZTMX'].astype(int)
-    sites['NZTMY'] = sites['NZTMY'].astype(int)
-
-    # Hover text
-    sites.loc[sites.ExtSiteName.isnull(), 'ExtSiteName'] = ''
-
-    sites['hover'] = sites.ExtSiteID + '<br>' + sites.ExtSiteName.str.strip()
-
-    # Convert projections
-    xy1 = list(zip(sites['NZTMX'], sites['NZTMY']))
-    x, y = list(zip(*[transform(from_crs1, to_crs1, x, y) for x, y in xy1]))
-
-    sites['lon'] = x
-    sites['lat'] = y
-
-    ## Combine with everything
-    ts_summ = pd.merge(sites, ts_summ2, on='ExtSiteID')
-
-    return ts_summ
-
-
-def rd_site_summ(server, db, lf_site_table, sites_table, from_date, to_date):
-    site_summ = mssql.rd_sql(server, db, lf_site_table, ['site', 'date', 'site_type', 'flow_method', 'days_since_flow_est', 'flow', 'crc_count', 'min_trig', 'max_trig', 'restr_category'], from_date=from_date, to_date=to_date, date_col='date', rename_cols=['ExtSiteID', 'Date', 'Site type', 'Data source', 'Days since last estimate', 'Flow or water level', 'Crc count', 'Min trigger', 'Max trigger', 'Restriction category'])
-    sites1 = site_summ.ExtSiteID.unique().tolist()
-
-    ## Get site info
-    sites = mssql.rd_sql(server, db, sites_table, ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY'], where_col={'ExtSiteID': sites1})
-    sites['NZTMX'] = sites['NZTMX'].astype(int)
-    sites['NZTMY'] = sites['NZTMY'].astype(int)
-
-    sites.loc[sites.ExtSiteName.isnull(), 'ExtSiteName'] = ''
-
-    # Convert projections
-    xy1 = list(zip(sites['NZTMX'], sites['NZTMY']))
-    x, y = list(zip(*[transform(from_crs1, to_crs1, x, y) for x, y in xy1]))
-
-    sites['lon'] = x
-    sites['lat'] = y
-
-    combo = pd.merge(sites, site_summ, on='ExtSiteID')
-
-    # Hover text
-    combo['hover'] = combo.ExtSiteID + '<br>' + combo.ExtSiteName.str.strip() + '<br>' + combo['Data source'] + ' ' + combo['Days since last estimate'].astype(str) + ' day(s) ago'
-
-    return combo
-
-
 ##########################################
 ### Parameters
 
 server = 'sql2012test01'
-db = 'hydro'
-sites_table = 'ExternalSite'
-lf_site_table = 'LowFlowRestrSite'
-lf_site_band_table = 'LowFlowRestrSiteBand'
-lf_crc_table = 'LowFlowRestrSiteBandCrc'
-#ts_summ_table = 'TSDataNumericDailySumm'
-#ts_table = 'TSDataNumericDaily'
-#dataset_table = 'vDatasetTypeNamesActive'
-#mtype_table = 'MeasurementType'
-sites_cols = ['ExtSiteID', 'ExtSiteName', 'NZTMX', 'NZTMY']
-#datasettypes = [4, 5, 15]
-#datasettype_names = {4: 'Water Level (m)', 5: 'Flow (m3/s)', 15: 'Precip (mm)'}
+database = 'hydro'
 
 site_types = ['LowFlow', 'Residual']
 data_source = ['Telemetered', 'Correlated from Telem', 'Gauged', 'Manually Calculated', 'GW manual']
 restr_type = ['No', 'Partial', 'Full', 'Deactivated']
+
+dataset_dict = {'features': ['River', 'Aquifer'],
+                'mtypes': ['Abstraction'],
+                'ctypes': ['Recorder'],
+                'data_codes': ['RAW'],
+                'data_providers': ['ECan']}
 
 ts_plot_height = 600
 map_height = 700
@@ -113,10 +40,6 @@ map_height = 700
 #default_band_options = [{'value:': 'All Bands', 'label': 'All Bands'}]
 
 default_colors = plotly.colors.DEFAULT_PLOTLY_COLORS
-
-### Convert projections
-from_crs1 = Proj('+proj=tmerc +ellps=GRS80 +a=6378137.0 +f=298.257222101 +towgs84=0,0,0,0,0,0,0 +pm=0  +lon_0=173 +x_0=1600000 +y_0=10000000 +k_0=0.9996 +lat_0=0 +units=m +axis=enu +no_defs', preserve_units=True)
-to_crs1 = Proj('+proj=longlat +datum=WGS84 +ellps=WGS84 +a=6378137 +f=298.257223563 +pm=0  +no_defs', preserve_units=True)
 
 restr_color_dict = {'No': 'rgb(44, 160, 44)', 'Partial': 'rgb(255, 127, 14)', 'Full': 'rgb(214, 39, 40)', 'Deactivated': 'rgb(31, 119, 180)'}
 
@@ -139,10 +62,14 @@ def serve_layout():
     to_date = pd.Timestamp.now()
     from_date = to_date - pd.DateOffset(weeks=2)
 
-    ### Read in site summary data
-    init_summ = rd_site_summ(server, db, lf_site_table, sites_table, str(from_date.date()), str(to_date.date()))
+    ### Read in initial site summary data
+    init_summ = lf_site_summ(server, database, str(from_date.date()), str(to_date.date()))
 
     new_sites = init_summ.drop_duplicates('ExtSiteID')
+
+    usage_ts_summ = ecan_ts_summ(server, database, **dataset_dict)
+
+    allo_usage1 = app_allo_usage_summ(server, database, str(from_date.date()), str(to_date.date()), init_summ, usage_ts_summ)
 
     layout = html.Div(children=[
     html.Div([
@@ -162,7 +89,9 @@ def serve_layout():
 #               start_date_placeholder_text='DD/MM/YYYY'
             ),
         html.Label('Site IDs'),
-		dcc.Dropdown(options=[{'label': d, 'value': d} for d in new_sites.ExtSiteID.sort_values()], multi=True, id='sites-dropdown')
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in new_sites.ExtSiteID.sort_values()], multi=True, id='sites-dropdown'),
+        html.Label('Consent Numbers'),
+		dcc.Dropdown(options=[{'label': d, 'value': d} for d in allo_usage1.crc.sort_values().unique()], multi=True, id='crc-dropdown')
 		], className='two columns', style={'margin': 20}),
 
 	html.Div([
@@ -211,8 +140,15 @@ def serve_layout():
 
     html.Div([
 
-		html.P('Select band for time series plot:', style={'display': 'inline-block'}),
-		dcc.Dropdown(options=[], multi=True, id='band-dropdown'),
+		html.P('Display plot by band or consent:', style={'display': 'inline-block'}),
+        dcc.RadioItems(
+            options=[
+                {'label': 'band', 'value': 'band'},
+                {'label': 'consent', 'value': 'consent'}
+            ],
+            value='band',
+            id='select1'),
+		dcc.Dropdown(options=[], multi=True, id='sel-dropdown'),
 		dcc.Graph(
 			id = 'selected-data',
 			figure = dict(
@@ -233,7 +169,9 @@ def serve_layout():
             target="_blank",
             style={'margin': 50})
 	], className='six columns', style={'margin': 10, 'height': 900}),
-    html.Div(id='summ_data', style={'display': 'none'}, children=init_summ.to_json(date_format='iso', orient='split')),
+    html.Div(id='lf_summ_data', style={'display': 'none'}, children=init_summ.to_json(date_format='iso', orient='split')),
+    html.Div(id='usage_summ_data', style={'display': 'none'}, children=usage_ts_summ.to_json(date_format='iso', orient='split')),
+    html.Div(id='usage_ts_data', style={'display': 'none'}, children=allo_usage1.to_json(date_format='iso', orient='split')),
     dcc.Graph(id='map-layout', style={'display': 'none'}, figure=dict(data=[], layout=map_layout))
 ], style={'margin':0})
 
@@ -253,7 +191,7 @@ app.css.append_css({'external_url': 'https://codepen.io/plotly/pen/EQZeaW.css'})
 def store_summ(start_date, end_date):
 #    ts_summ['FromDate'] = pd.to_datetime(ts_summ['FromDate'])
 #    ts_summ['ToDate'] = pd.to_datetime(ts_summ['ToDate'])
-    new_summ = rd_site_summ(server, db, lf_site_table, sites_table, start_date, end_date)
+    new_summ = lf_site_summ(server, database, start_date, end_date)
     print('store_summ', start_date, end_date)
     return new_summ.to_json(date_format='iso', orient='split')
 
@@ -318,18 +256,20 @@ def display_map(summ_data, site_type, data_source, restr_type, figure, end_date)
 
 
 @app.callback(
-    Output('band-dropdown', 'options'),
-    [Input('sites-dropdown', 'value'), Input('site-map', 'clickData')],
+    Output('sel-dropdown', 'options'),
+    [Input('sites-dropdown', 'value'), Input('site-map', 'clickData'), Input('select1', 'value')],
     [State('date_sel', 'end_date')])
-def update_band_options(sites, clickdata, end_date):
+def update_band_options(sites, clickdata, end_date, select1):
     if not sites:
         options1 = []
-    else:
+    elif select1 == 'band':
         sites1 = [str(s) for s in sites]
         site_bands = mssql.rd_sql(server, db, lf_site_band_table, ['band_num', 'band_name', 'site_type'], where_col={'site': sites1}, from_date=end_date, to_date=end_date, date_col='date').drop_duplicates(['band_name'])
         site_bands['label'] = site_bands['band_name'] + ' - ' + site_bands['site_type']
         site_bands1 = site_bands.rename(columns={'band_num': 'value'}).drop(['band_name', 'site_type'], axis=1)
         options1 = site_bands1.to_dict('records')
+#    elif select1 == 'consent':
+
 
 #    print(options1)
     return options1
@@ -422,7 +362,7 @@ def display_data(sites, bands, start_date, end_date):
                 y=flow_data.flow,
                 legendgroup='flow',
                 name='Flow',
-                line={'color': 'black'},
+                line={'color': 'black', 'shape': 'hv'},
                 opacity=1)]
     for name, group in ts1.groupby('band_name'):
         min_trig = go.Scattergl(
@@ -431,7 +371,7 @@ def display_data(sites, bands, start_date, end_date):
                 legendgroup=name,
                 name='Min Trigger, ' + name,
                 mode='lines',
-                line=dict(dash='dot', color=color_dict[name]),
+                line=dict(dash='dot', color=color_dict[name], shape='hv'),
                 opacity=0.7,
                 yaxis='y1')
         max_trig = go.Scattergl(
@@ -440,7 +380,7 @@ def display_data(sites, bands, start_date, end_date):
                 legendgroup=name,
                 name='Max Trigger, ' + name,
                 mode='lines',
-                line=dict(dash='dash', color=color_dict[name]),
+                line=dict(dash='dash', color=color_dict[name], shape='hv'),
                 opacity=0.7,
                 yaxis='y1')
         allo = go.Scattergl(
@@ -448,7 +388,7 @@ def display_data(sites, bands, start_date, end_date):
                 y=group.band_allo,
                 legendgroup=name,
                 name='Allowed Allocation %, ' + name,
-                line=dict(color=color_dict[name]),
+                line=dict(color=color_dict[name], shape='hv'),
                 opacity=0.7,
                 yaxis='y2',
                 xaxis='x1')
