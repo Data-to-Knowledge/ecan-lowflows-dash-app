@@ -21,7 +21,7 @@ server = app.server
 ##########################################
 ### Parameters
 
-server = 'sql2012test01'
+server = 'edwprod01'
 database = 'hydro'
 
 site_types = ['LowFlow', 'Residual']
@@ -448,4 +448,3 @@ def download_summ(summ_data):
 
 if __name__ == '__main__':
 	app.run_server(debug=True, host='0.0.0.0', port=8050)
-
