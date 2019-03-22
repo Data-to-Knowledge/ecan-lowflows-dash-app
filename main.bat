@@ -1,2 +1,1 @@
-call activate dash-map-lowflows
-call python %~dp0\app.py
+D:\programs\Anaconda3_64bit\envs\dash-map-lowflows\python.exe %~dp0\app.py
