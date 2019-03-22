@@ -15,8 +15,8 @@ from allotools.allocation_ts import allo_ts
 ### Parameters
 
 ## Convert projections
-from_crs = Proj('+proj=tmerc +ellps=GRS80 +a=6378137.0 +f=298.257222101 +towgs84=0,0,0,0,0,0,0 +pm=0  +lon_0=173 +x_0=1600000 +y_0=10000000 +k_0=0.9996 +lat_0=0 +units=m +axis=enu +no_defs', preserve_units=True)
-to_crs = Proj('+proj=longlat +datum=WGS84 +ellps=WGS84 +a=6378137 +f=298.257223563 +pm=0  +no_defs', preserve_units=True)
+from_crs = Proj('+proj=tmerc +ellps=GRS80 +lon_0=173 +x_0=1600000 +y_0=10000000 +k_0=0.9996 +lat_0=0 +units=m +no_defs', preserve_units=True)
+to_crs = Proj('+proj=longlat +datum=WGS84')
 
 sites_table = 'ExternalSite'
 ts_summ_table = 'TSDataNumericDailySumm'
